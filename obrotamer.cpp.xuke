@@ -1,0 +1,564 @@
+/*********************************************************************
+obrotate = rotate a tortional bond matched by a SMART pattern
+Copyright (C) 2003 Fabien Fontaine
+Some portions Copyright (C) 2004-2005 Geoffrey R. Hutchison
+Some portions Copyright (C) 2008 Tim Vandermeersch
+
+This file is part of the Open Babel project.
+For more information, see <http://openbabel.org/>
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation version 2 of the License.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+***********************************************************************/
+
+// used to set import/export for Cygwin DLLs
+#ifdef WIN32
+#define USING_OBDLL
+#endif
+
+#define TEST //std::cerr<<"Runned line no."<<__LINE__<<std::endl;
+
+#include <fstream>
+#include <sstream>
+
+#include <openbabel/babelconfig.h>
+#include <openbabel/mol.h>
+#include <openbabel/parsmart.h>
+#include <openbabel/rotamer.h>
+//#include <unistd.h>
+#include <openbabel/obconversion.h>
+#include <openbabel/forcefield.h>
+
+#include "options2.hpp"
+
+using namespace std;
+using namespace OpenBabel;
+
+static int sum = 0;
+char *FileIn = NULL;
+float angle = 0;      // tortional angle value to set in degree
+int angleSum = 0;
+long double totalSum = 1;
+OBConversion conv; //NF...
+OBForceField *forceField = NULL;
+int degrees = 0;
+int N=0,M=0,L=0;
+double R=0,K=0,A=0;
+OBMol mol;
+vector< vector <int> > maplist; 
+vector< vector <int> > angleList;
+vector<int> atoms; // store the atoms of broken bonds
+vector <int> angatoms ;// store the atoms which forms angles
+vector<double> lengths;
+vector<double> equiang;
+
+bool ringCalculating = false;
+
+bool isContained(vector<int*>& mols, int* indexes)
+{
+	for (vector<int*>::iterator ind = mols.begin(); ind != mols.end(); ++ind)
+	{
+		bool set = true;
+		for (int i = 0; i < degrees; ++i)
+			if (indexes[i] != (*ind)[i])
+				set = false;
+		if (set)
+			return true;
+	}
+	return false;
+}
+
+void eachOperationToMol(int k,int step,ostringstream& oss)
+{
+	oss.str("");
+	oss << sum++ << "," << FileIn;
+	ofstream ofs(oss.str().c_str());
+	cerr << "Outputing file no." << sum << "/" << totalSum << endl;
+	conv.Write(&mol, &ofs); //NF
+}
+
+void turnMol(vector<vector<int> >& shitList, int k)
+{
+	if (k < 0)
+		return;
+	if (k >= maplist.size())
+		return;
+	OBAtom *a1, *a2, *a3, *a4;
+
+	ostringstream oss;
+	double beginAngle=shitList[k][0]*DEG_TO_RAD;
+	double endAngle=shitList[k][1]*DEG_TO_RAD;
+	int turnSumOfEachAngle=shitList[k][2];
+	double turnAngleStep=endAngle-beginAngle;
+	turnAngleStep/=turnSumOfEachAngle;
+	for (int i = 0; i <= turnSumOfEachAngle; ++i) {
+		a2 = mol.GetAtom(maplist[k][0]);
+		a3 = mol.GetAtom(maplist[k][1]);
+		std::vector<OBEdgeBase*>::iterator temp = a2->BeginBonds();
+		a1 = a2->BeginNbrAtom(temp);
+		if (a1 == a3)
+			a1 = a2->NextNbrAtom(temp);
+		temp = a3->BeginBonds();
+		a4 = a3->BeginNbrAtom(temp);
+		if (a4 == a2)
+			a4 = a3->NextNbrAtom(temp);
+
+		mol.SetTorsion(a1, a2, a3, a4, beginAngle + i * turnAngleStep);
+
+		eachOperationToMol(k,i,oss);
+		turnMol(shitList, k - 1);
+	}
+}
+
+class Cell
+{
+public:
+	double energy;
+	vector<double> angles;
+	bool operator<(const Cell &c){return energy<c.energy;}
+};
+
+class Bytes
+{
+public:
+	Bytes(double d)
+	{
+		union
+		{
+			double d;
+			long long i;
+		}k;
+		k.d=d;
+		const long long one=1;
+		for (int i=0;i<64;++i)
+			booleans.push_back(k.i&(one<<i));
+	}
+	void set(int i,bool b)
+	{
+		booleans.at(i)=b;
+	}
+	void set(int i)
+	{
+		booleans.at(i)=!booleans.at(i);
+	}
+	bool get(int i)
+	{
+		return booleans.at(i);
+	}
+	double get()
+	{
+		union
+		{
+			double d;
+			long long i;
+		}k;
+		k.i=0;
+		const long long one=1;
+		for (int i=0;i<64;++i)
+			if(booleans.at(i))
+				k.i|=(one<<i);	
+		return k.d;
+	}
+private:
+	vector<bool> booleans;
+};
+
+Cell crossCell(const Cell& c1,const Cell& c2)
+{
+	Cell c;
+	for (int i=0;i<c1.angles.size();++i)
+	{
+		Bytes b1(c1.angles[i]);
+		Bytes b2(c2.angles[i]);
+		for (int j=0;j<64;++j)
+			if (rand()%2)
+				b1.set(j,b2.get(j));
+		double ang=b1.get();
+		ang/=pow(10,max(0,static_cast<int>(log(ang)/log(10))));
+		ang=ang<0?-ang:ang;
+		while (rand()/static_cast<double>(RAND_MAX)<R)
+		{
+			ang+=rand()/static_cast<double>(RAND_MAX);
+			while (ang>1)
+				ang-=1;
+		}
+		c.angles.push_back(ang);
+	}
+	return c;
+}
+
+double getangle( OBAtom *a1, OBAtom *a2, OBAtom *a3)
+{
+double x=a2->GetX()-a1->GetX();
+double y=a2->GetY()-a1->GetY();
+double z=a2->GetZ()-a1->GetZ();
+double xx=a3->GetX()-a1->GetX();
+double yy=a3->GetY()-a1->GetY();
+double zz=a3->GetZ()-a1->GetZ();
+
+double la=pow(x*x+y*y+z*z,0.5);
+double lb=pow(xx*xx+yy*yy+zz*zz,0.5);
+
+ return acos((x*xx + y*yy + z*zz)/(la*lb)) ;
+ }
+
+
+
+
+void setCellEnergy(Cell& cell)
+{
+	OBAtom *a1, *a2, *a3, *a4;
+
+	ostringstream oss;
+	for (int k = 0; k < maplist.size(); ++k) {
+		double beginAngle=maplist[k][2]*DEG_TO_RAD;
+		double endAngle=maplist[k][3]*DEG_TO_RAD;
+		double turnAngleStep=endAngle-beginAngle;
+		turnAngleStep*=cell.angles[k];
+		a2 = mol.GetAtom(maplist[k][0]);
+		a3 = mol.GetAtom(maplist[k][1]);
+		std::vector<OBEdgeBase*>::iterator temp = a2->BeginBonds();
+		a1 = a2->BeginNbrAtom(temp);
+		if (a1 == a3)
+			a1 = a2->NextNbrAtom(temp);
+		temp = a3->BeginBonds();
+		a4 = a3->BeginNbrAtom(temp);
+		if (a4 == a2)
+			a4 = a3->NextNbrAtom(temp);
+
+		mol.SetTorsion(a1, a2, a3, a4, beginAngle + turnAngleStep);
+	}
+	forceField->Setup(mol);
+	cell.energy=forceField->Energy(false);
+
+	if (ringCalculating)
+	{
+               // the energy of broken bond
+		for (int i=0;i<atoms.size()/2;++i)
+		{
+			OBAtom * at1=mol.GetAtom(atoms.at(2*i));
+			OBAtom * at2=mol.GetAtom(atoms.at(2*i+1));
+			double l0 = lengths.at(i);
+			double x=at1->GetX()-at2->GetX();
+			double y=at1->GetY()-at2->GetY();
+			double z=at1->GetZ()-at2->GetZ();
+			double l = pow(x*x+y*y+z*z,0.5) - l0;
+			if (l<0)
+				l=-l;
+			cell.energy+=K*l*l;
+		}
+               //-------------------------------------
+               // the energy of angles -2015.6.16 
+              for (int i=1;i<=atoms.size();i++)
+                {
+                    int a=(i%2)?((i+1)/2):(i/2);
+                        OBAtom * aav=mol.GetAtom(atoms.at(i-1)); // the vertex of the angle
+                        OBAtom * na1;
+                        if (!(i%2)) {
+                        na1=mol.GetAtom(atoms.at(i-2));
+                        } else
+                        {
+                        na1=mol.GetAtom(atoms.at(i));
+                        }
+                        OBAtom * na2=mol.GetAtom(angatoms.at(i-1));
+                       double ang=getangle(aav,na1,na2)- equiang.at(a-1)*DEG_TO_RAD;
+                        cell.energy+=A*ang*ang;
+                }
+
+	}
+}
+
+template<class T>
+T findMin(T begin,T end)
+{
+	T& th=begin;
+	for (T t=begin;t!=end;++t)
+		if ((*t)<(*th))
+			th=t;
+	return th;
+}
+
+void getBest(vector<Cell> &cs)
+{
+	for (vector<Cell>::iterator c=cs.begin();c!=cs.end();++c)
+		setCellEnergy(*c);
+	int qSize=N/M;
+	vector<Cell> temp;
+	for (int i=0;i<M;++i)
+		temp.push_back(*(findMin(cs.begin()+i*qSize,min(cs.end(),cs.begin()+(i+1)*qSize))));
+	cs=temp;
+}
+
+void outBest(vector<Cell> &cs)
+{
+	OBAtom *a1, *a2, *a3, *a4;
+	ostringstream oss;
+	int all=0;
+	for (vector<Cell>::iterator c=cs.begin();c!=cs.end();++c)
+	{
+		for (int k = 0; k < maplist.size(); ++k) {
+			double beginAngle=maplist[k][2]*DEG_TO_RAD;
+			double endAngle=maplist[k][3]*DEG_TO_RAD;
+			double turnAngleStep=endAngle-beginAngle;
+			turnAngleStep*=c->angles[k];
+			a2 = mol.GetAtom(maplist[k][0]);
+			a3 = mol.GetAtom(maplist[k][1]);
+			std::vector<OBEdgeBase*>::iterator temp = a2->BeginBonds();
+			a1 = a2->BeginNbrAtom(temp);
+			if (a1 == a3)
+				a1 = a2->NextNbrAtom(temp);
+			temp = a3->BeginBonds();
+			a4 = a3->BeginNbrAtom(temp);
+			if (a4 == a2)
+				a4 = a3->NextNbrAtom(temp);
+	
+			mol.SetTorsion(a1, a2, a3, a4, beginAngle + turnAngleStep);
+		}
+		oss.str("");
+		oss << all++ << "_" << FileIn;
+		ofstream ofs(oss.str().c_str());
+	       //cerr << "Outputing file no." << all << "/" << M << endl;
+		conv.Write(&mol, &ofs); //NF
+	}
+}
+
+void gen(vector<Cell> &cs)
+{
+	for (vector<Cell>::iterator c=cs.begin();c!=cs.end();++c)
+		setCellEnergy(*c);
+	int qSize=N/M;
+	vector<Cell> temp;
+	for (int i=0;i<M;++i)
+                //std::cout << "min(cs.end(),cs.begin()+(i+1)*qSize)" << min(cs.end(),cs.begin()+(i+1)*qSize) << endl;
+		temp.push_back(*(findMin(cs.begin()+i*qSize,min(cs.end(),cs.begin()+(i+1)*qSize))));
+	vector<Cell> hell(temp);
+TEST
+	while(hell.size()<N)
+		hell.insert(hell.begin()+rand()%hell.size(),crossCell(temp[rand()%temp.size()],temp[rand()%temp.size()]));
+TEST
+	cs=hell;
+}
+
+Cell randomCell(int size)
+{
+	Cell c;
+	for (int i=0;i<size;++i)
+		c.angles.push_back(rand()/static_cast<double>(RAND_MAX));
+	return c;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+//! \brief Set a tortional bond to a given angle
+int main(int argc, char **argv)
+{
+	const char *Pattern = "[!$(*#*)&!D1]-!@[!$(*#*)&!D1]";
+	unsigned int i, t, errflg = 0;
+	int c;
+	char flags[255];
+	string err;
+	bool outputLists = false;
+	bool usingOptions = false;
+	bool workingStatus = false;
+	bool allIn = false;
+	std::vector<int> mols;
+	std::vector<int> angles;
+
+	forceField = OBForceField::FindForceField("MMFF94");
+
+	if (argc < 6 || argc > 7) {
+		errflg++;
+	}
+	else {
+		FileIn = argv[1];
+		// Read the atom position
+		c = sscanf(argv[2], "%d", &N);
+		c = sscanf(argv[3], "%d", &M);
+		c = sscanf(argv[4], "%d", &L);
+		c = sscanf(argv[5], "%lf", &R);
+		angle = 360. / angleSum;
+		if (argc == 7)
+		{
+			c = sscanf(argv[6], "%s", flags);
+			int flagid = 1;
+			while (flags[flagid] != 0)
+				switch (flags[flagid++])
+				{
+				case 'f':
+					usingOptions = true;
+					{
+						std::ifstream ifs("optionin");
+						Options options(ifs);
+						mols = options.getResult();
+						angles = options.getAngles();
+                                               //  cout << "angles.size()= " << angles.size() << endl;
+						atoms = options.getAtoms();
+                                              //----------------------------------
+						angatoms = options.getangAtoms();
+                                                // cout << "angatoms.size()= " << angatoms.size() << endl;
+                                              //----------------------------------
+						lengths = options.getLengths();
+
+						equiang = options.getequiang();
+                                                // cout << "equiang.size()= " << equiang.size() << endl;
+
+						workingStatus = options.getWorkingStatus();
+						ringCalculating = options.getRingCalculating();
+						K = options.getK();
+						A = options.getA(); // constant of angle
+                                                
+						allIn = options.getAllInStatus();
+					}
+					break;
+				case 'l':
+					outputLists = true;
+					break;
+				}
+		}
+	}
+	if (errflg) {
+		cerr << "Usage: rkrotate <filename> <N> <M> <L> <R> [options]" << endl;
+		exit(-1);
+	}
+
+	// create pattern
+	OBSmartsPattern sp;
+	sp.Init(Pattern);
+
+	OBFormat* format = conv.FormatFromExt(FileIn);
+	if (!(format && conv.SetInAndOutFormats(format, format))) { //in and out formats same
+		cerr << "obrotate: cannot read and/or write this file format!" << endl;
+		exit(-1);
+	} //...NF
+
+	//Open the molecule file
+	ifstream ifs;
+
+	// Read the file
+	ifs.open(FileIn);
+	if (!ifs) {
+		cerr << "obrotate: cannot read input file!" << endl;
+		exit(-1);
+	}
+
+	// Set the angles
+	for (;;) {
+		mol.Clear();
+		conv.Read(&mol, &ifs); //NF
+		if (mol.Empty())
+			break;
+
+		if (sp.Match(mol)) {
+			// if match perform rotation
+			maplist = sp.GetUMapList(); // get unique matches
+
+			if (maplist.size() > 1)
+				cerr << "obrotate: Found " << maplist.size() << " matches." << endl;
+			if (outputLists)
+			{
+				OBAtom *a1, *a2, *a3, *a4;
+				std::ofstream listf("outfile.txt");
+				for (int asdf=0;asdf<maplist.size();++asdf)
+				{
+					a2 = mol.GetAtom(maplist[asdf][0]);
+					a3 = mol.GetAtom(maplist[asdf][1]);
+					std::vector<OBEdgeBase*>::iterator temp = a2->BeginBonds();
+					a1 = a2->BeginNbrAtom(temp);
+					if (a1 == a3)
+						a1 = a2->NextNbrAtom(temp);
+					temp = a3->BeginBonds();
+					a4 = a3->BeginNbrAtom(temp);
+					if (a4 == a2)
+						a4 = a3->NextNbrAtom(temp);
+					listf<<asdf<<" "
+						<<a1->GetIdx()<<":"<<a1->GetType()<<" "
+						<<a2->GetIdx()<<":"<<a2->GetType()<<" "
+						<<a3->GetIdx()<<":"<<a3->GetType()<<" "
+						<<a4->GetIdx()<<":"<<a4->GetType()<<" "<<endl;
+				}
+				return 0;
+			}
+			if (usingOptions&&(!allIn))
+			{
+				for(int j = 0; j < angles.size()/2; ++j)
+				{
+					angleList.push_back(vector<int>());
+					angleList.back().push_back(angles[j*2+0]);
+					angleList.back().push_back(angles[j*2+1]);
+				}
+                                     //-----------------------------------------------------------------                                
+                                      //       cout << "angleList.size()= " << angleList.size() << endl;
+                                     //------------------------------------------------------------------
+				if (workingStatus)
+				{
+					int i = mols.size();
+					i /= 4;
+					vector<vector<int> > temp;
+					for (int j = 0; j < i; ++j)
+					{
+						temp.push_back(vector<int>());
+						temp.back().push_back(mols[j * 4 + 1]);
+						temp.back().push_back(mols[j * 4 + 2]);
+					}
+					maplist = temp;
+				}
+				else
+				{
+					int i = maplist.size();
+					vector<bool> boolGraph;
+					boolGraph.resize(maplist.size());
+					for (vector<int>::iterator ite = mols.begin(); ite != mols.end(); ++ite)
+						boolGraph[*ite%maplist.size()] = !boolGraph[*ite%maplist.size()];
+					vector<vector<int> > temp;
+					for (int i = 0; i < maplist.size(); ++i)
+						if (boolGraph[i])
+							temp.push_back(maplist[i]);
+					maplist = temp;
+				}
+			}
+			else
+			{
+				for(int j = 0; j < maplist.size(); ++j)
+				{
+					angleList.push_back(vector<int>());
+					angleList.back().push_back(0);
+					angleList.back().push_back(360);
+				}
+			}
+			for (int i=0;i<maplist.size();++i)
+			{
+				maplist[i].push_back(angleList[i][0]);
+				maplist[i].push_back(angleList[i][1]);
+			}
+
+			//turnMol(angleList, maplist.size() - 1);
+			vector<Cell> mosss;
+			for (int i=0;i<N;++i)
+			{
+				mosss.push_back(randomCell(maplist.size()));
+			}
+			for (int i=0;i<L;++i)
+			{
+			       //cerr << "rkrotate: Generating generation " << i << " out of " << L << endl;
+				gen(mosss);
+			}
+			getBest(mosss);
+			outBest(mosss);
+			cout << M;//<< sum;
+		}
+		else {
+			cerr << "obrotate: Found 0 matches for the SMARTS pattern." << endl;
+			exit(-1);
+		}
+		//NF      cout << mol;
+	}
+
+	return(0);
+}
+
+

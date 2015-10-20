@@ -1,0 +1,1 @@
+/usr/bin/c++      CMakeFiles/ecdconf.dir/ecdconf.cpp.o  -o ecdconf -rdynamic -L/home/liu/projects/conformation/GA/galib247/ga -lopenbabel /home/liu/soft/babel/lib/libopenbabel.so -lga -lga -Wl,-rpath,/home/liu/soft/babel/lib:/home/liu/projects/conformation/GA/galib247/ga 
